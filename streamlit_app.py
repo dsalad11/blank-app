@@ -13,9 +13,7 @@ st.set_page_config(
 # --- Custom Styling ---
 st.markdown("""
     <style>
-    .main {
-        background-color: #f8f9fa;
-    }
+    .main { background-color: #f8f9fa; }
     .metric-card {
         background-color: white;
         padding: 20px;
@@ -39,119 +37,115 @@ POSITIONS = [
 ]
 
 PRESETS = {
-    "2025 Minnesota Vikings": [4.5, 2.1, 16.5, 8.2, 15.0, 17.5, 6.2, 12.0, 2.5],
-    "2023 49ers (Rookie QB)": [1.2, 6.5, 18.0, 9.0, 12.0, 19.5, 8.5, 11.5, 2.0],
-    "2024 Chiefs (Elite QB)": [19.5, 1.5, 7.2, 8.5, 16.5, 15.0, 4.5, 14.5, 2.8],
+    "2025 Minnesota Vikings": {"spend": [4.5, 2.1, 16.5, 8.2, 15.0, 17.5, 6.2, 12.0, 2.5], "prod": [45, 60, 95, 75, 70, 78, 65, 72, 80]},
+    "2025 New England Patriots": {"spend": [3.8, 4.2, 8.5, 5.0, 14.0, 16.0, 8.0, 15.0, 3.0], "prod": [92, 55, 60, 50, 65, 82, 70, 88, 75]},
+    "2024 Chiefs (Elite QB)": {"spend": [19.5, 1.5, 7.2, 8.5, 16.5, 15.0, 4.5, 14.5, 2.8], "prod": [98, 70, 65, 90, 85, 88, 75, 92, 85]},
 }
 
 # --- Sidebar Inputs ---
 st.sidebar.title("🎮 GM Command Center")
-st.sidebar.info("Adjust positional spending to see the ROI impact.")
 
 selected_preset = st.sidebar.selectbox("Load Team Preset", list(PRESETS.keys()))
-preset_vals = PRESETS[selected_preset]
+preset_spend = PRESETS[selected_preset]["spend"]
+preset_prod = PRESETS[selected_preset]["prod"]
 
-# Initialize session state for sliders if not exists
-if 'slider_vals' not in st.session_state:
-    st.session_state.slider_vals = preset_vals
-
-# Button to trigger Jefferson Extension
-if st.sidebar.button("✍️ Sign Jefferson (Max Extension)"):
-    # Setting WR to 18% (Index 2 in our list)
-    st.session_state.slider_vals[2] = 18.0
-
-# Generate Sliders
+st.sidebar.subheader("💰 Cap Allocation (%)")
 current_allocations = []
 for i, pos in enumerate(POSITIONS):
-    val = st.sidebar.slider(
-        f"{pos['name']} (%)", 
-        0.0, 30.0, 
-        float(st.session_state.slider_vals[i]), 
-        key=f"slider_{pos['id']}"
-    )
+    val = st.sidebar.slider(f"{pos['short']} Spend", 0.0, 30.0, float(preset_spend[i]), key=f"s_{pos['id']}")
     current_allocations.append(val)
+
+st.sidebar.subheader("📊 Production Grade (1-100)")
+current_production = []
+for i, pos in enumerate(POSITIONS):
+    p_val = st.sidebar.slider(f"{pos['short']} Performance", 0, 100, int(preset_prod[i]), key=f"p_{pos['id']}")
+    current_production.append(p_val)
 
 # --- Calculations ---
 total_cap = sum(current_allocations)
-raw_roi = sum(val * POSITIONS[i]['weight'] for i, val in enumerate(current_allocations))
-roi_score = round(raw_roi / (total_cap / 10 if total_cap > 0 else 1), 1)
+# ROI = (Production / Spend) weighted by positional importance
+roi_components = []
+for i in range(len(POSITIONS)):
+    spend = current_allocations[i] if current_allocations[i] > 0 else 0.1
+    efficiency = (current_production[i] / spend) * POSITIONS[i]['weight']
+    roi_components.append(efficiency)
+
+avg_roi = sum(roi_components) / len(POSITIONS)
 
 # --- Dashboard Layout ---
 st.title("🏈 NFL Roster ROI & Strategy Tool")
-st.markdown("### Analyzing Capital Allocation vs. Historical Success Twins")
 
 # Top Metric Row
 col1, col2, col3, col4 = st.columns(4)
-col1.metric("Total Cap Used", f"{total_cap:.1f}%", delta=f"{100-total_cap:.1f}% Remaining", delta_color="inverse")
-col2.metric("Roster ROI Score", roi_score)
-col3.metric("Premium Position Spend", f"{current_allocations[0] + current_allocations[4] + current_allocations[5] + current_allocations[7]:.1f}%")
+col1.metric("Total Cap Used", f"{total_cap:.1f}%", delta=f"{100-total_cap:.1f}% Rem.", delta_color="inverse")
+col2.metric("Team Efficiency Rating", f"{avg_roi:.1f}")
+qb_roi = (current_production[0] / current_allocations[0]) if current_allocations[0] > 0 else 0
+col3.metric("QB ROI (Production/Cost)", f"{qb_roi:.1f}x")
 
-# Success Twin Logic
-twin = "2025 Vikings"
-twin_type = "Balanced"
-if total_cap > 100:
-    twin = "Cap Crisis (Saints Style)"
-elif current_allocations[2] >= 18:
-    twin = "Mega-WR (Dolphins/Raiders)"
-elif current_allocations[0] < 3:
-    twin = "Rookie Window (49ers)"
-elif current_allocations[0] > 15:
-    twin = "Elite QB (Chiefs)"
+# Logic for Success Twin
+twin = "Average Efficiency"
+if qb_roi > 20:
+    twin = "Elite Rookie Value (Patriots/49ers)"
+elif current_allocations[0] > 15 and current_production[0] > 90:
+    twin = "Elite Vet (Chiefs/Bengals)"
+elif current_production[0] < 60 and current_allocations[0] < 10:
+    twin = "QB Purgatory (Vikings/Giants)"
 
-col4.metric("Success Twin", twin)
+col4.metric("Strategic Archetype", twin)
+
+st.divider()
 
 # Visualizations Row
-st.divider()
 c1, c2 = st.columns(2)
 
 with c1:
-    st.subheader("Capital Allocation Breakdown")
-    fig_pie = px.pie(
-        values=current_allocations, 
-        names=[p['short'] for p in POSITIONS],
-        hole=0.5,
-        color_discrete_sequence=px.colors.qualitative.Prism
+    st.subheader("The Efficiency Matrix: Production vs. Cost")
+    # Scatter plot to show ROI clearly
+    df_plot = pd.DataFrame({
+        "Position": [p['short'] for p in POSITIONS],
+        "Spend (%)": current_allocations,
+        "Production": current_production,
+        "ROI": roi_components
+    })
+    
+    fig_scatter = px.scatter(
+        df_scatter := df_plot, x="Spend (%)", y="Production", 
+        text="Position", size="ROI", color="ROI",
+        color_continuous_scale='RdYlGn',
+        title="Upper Left = High ROI (Steals) | Lower Right = Low ROI (Busts)"
     )
-    fig_pie.update_traces(textposition='inside', textinfo='percent+label')
-    fig_pie.update_layout(legend_title_text='Position Groups')
-    st.plotly_chart(fig_pie, use_container_width=True)
+    fig_scatter.update_traces(textposition='top center')
+    st.plotly_chart(fig_scatter, use_container_width=True)
 
 with c2:
-    st.subheader("Positional ROI Efficiency")
-    # Calculate individual ROI for bar chart
-    roi_vals = [val * POSITIONS[i]['weight'] for i, val in enumerate(current_allocations)]
-    
+    st.subheader("Weighted ROI per Unit")
     fig_bar = px.bar(
-        x=[p['short'] for p in POSITIONS],
-        y=roi_vals,
-        labels={'x': 'Position Group', 'y': 'Efficiency Grade (ROI)'},
-        color=roi_vals,
-        color_continuous_scale='Viridis'
+        df_plot, x="Position", y="ROI",
+        color="ROI", color_continuous_scale='Viridis'
     )
-    fig_bar.update_layout(showlegend=False)
     st.plotly_chart(fig_bar, use_container_width=True)
 
 # --- AI Strategy Audit ---
 st.divider()
-st.subheader("✨ AI Roster Audit & Accounting Narrative")
+st.subheader("✨ AI Executive Audit")
 
-with st.expander("View Strategic Analysis", expanded=True):
-    if total_cap > 100:
-        st.error(f"🚨 **HARD CAP VIOLATION:** Your roster is {total_cap-100:.1f}% over the limit. From an accounting perspective, you must restructure contracts (Amortization) or release veterans (Impairment) immediately.")
+with st.expander("View Financial & Performance Analysis", expanded=True):
+    qb_spend = current_allocations[0]
+    qb_perf = current_production[0]
+    
+    if qb_spend < 10 and qb_perf < 60:
+        st.warning(f"⚠️ **QB EFFICIENCY ALERT:** You are spending very little ({qb_spend}%) on QB, but the production ({qb_perf}) is sub-par. This is 'False Economy'—the savings aren't being converted into wins.")
+    elif qb_spend < 10 and qb_perf > 85:
+        st.success(f"💎 **MAXIMUM LEVERAGE:** The {selected_preset} are receiving elite QB play on a budget. This is the 'Super Bowl Window' profile.")
     
     st.write(f"""
-    **Current Posture:** {twin} Strategy.
+    **Unit Analysis:**
+    * **Best Value Unit:** {df_plot.loc[df_plot['ROI'].idxmax(), 'Position']}
+    * **Worst Value Unit:** {df_plot.loc[df_plot['ROI'].idxmin(), 'Position']}
     
-    **Executive Summary:** Your current ROI score of **{roi_score}** suggests a strategy that prioritizes 
-    {'Premium positions' if roi_score > 7 else 'Depth and non-premium stability'}. 
-    By allocating **{current_allocations[0]}%** to the Quarterback department, you are essentially 
-    {'betting on a high-cost CEO multiplier' if current_allocations[0] > 15 else 'leveraging a low-cost rookie asset'}.
-    
-    **Recommendations:**
-    1. **Positional Value:** Your spending on RB/LB/ST totals **{current_allocations[1] + current_allocations[6] + current_allocations[8]:.1f}%**. Successful twins usually keep this below 12% to fund the trenches.
-    2. **Sustainability:** Ensure your Dead Money (unallocated costs) doesn't climb as you restructure for the Jefferson extension.
+    **GM Recommendation:** Your roster is currently categorized as a **{twin}**. 
+    To improve your **{avg_roi:.1f}** Efficiency Rating, look at the units in the lower-right of the Efficiency Matrix. 
+    Those units are 'Cap Bleeders'—high cost with low output.
     """)
 
-# --- Footer ---
-st.caption("Data sources: OverTheCap, Spotrac, and Pro-Football-Reference. Built for Data Analytics in Accounting.")
-
+st.caption("ROI Formula: (Production Grade / Cap Allocation %) * Positional Weighting")
