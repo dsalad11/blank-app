@@ -8,6 +8,7 @@ st.set_page_config(page_title="NFL GM Roster ROI", layout="wide")
 SALARY_CAP_2026 = 303_500_000
 
 # Positional Groups & Premium Weights
+# Premium positions (QB, WR, OL, DL) have higher weights to justify high spending
 POS_DATA = {
     "QB": {"groups": ["QB"], "weight": 1.0},
     "WR": {"groups": ["WR"], "weight": 0.95},
@@ -30,7 +31,8 @@ def get_roi_category(pos_label):
 
 def clean_name(name):
     if pd.isna(name) or name == "-" or "Rank" in str(name) or "Pos" in str(name): return None
-    return re.sub(r'\s(Q|IR|PUP|SUSP|NFI)$', '', str(name)).strip()
+    # Remove Q, IR, and suffixes like Jr/Sr
+    return re.sub(r'\s(Q|IR|PUP|SUSP|NFI|Jr\.|Sr\.)$', '', str(name)).strip()
 
 def clean_currency(value):
     if pd.isna(value): return 0.0
@@ -51,13 +53,14 @@ if roster_file:
     cap_col = next((c for c in df_rost.columns if "cap" in c.lower()), "Cap Number")
     fin_list = []
     for _, row in df_rost.iterrows():
-        name = clean_name(row.get('Player'))
+        name = clean_name(row.get('Player', row.get('Unnamed: 2')))
         if name: fin_list.append({'Player': name, 'Cap Hit': clean_currency(row[cap_col])})
     player_data = pd.DataFrame(fin_list).drop_duplicates('Player')
     
     pos_map = {}
-    pos_labels = df_rost.iloc[:, 12]
-    depth_players = df_rost.iloc[:, 13:17]
+    # Handle different CSV structures for position and depth chart
+    pos_labels = df_rost.iloc[:, 12] if len(df_rost.columns) > 12 else df_rost.iloc[:, 0]
+    depth_players = df_rost.iloc[:, 13:17] if len(df_rost.columns) > 16 else df_rost.iloc[:, 1:5]
     for idx, label in enumerate(pos_labels):
         if pd.isna(label): continue
         for p_name in depth_players.iloc[idx].dropna():
@@ -66,26 +69,23 @@ if roster_file:
     player_data['Position'] = player_data['Player'].map(pos_map)
     player_data['Cap %'] = (player_data['Cap Hit'] / SALARY_CAP_2026) * 100
 
-# 2. Process Performance File (FIXED PARSING & LABELING)
+# 2. Process Performance File
 if perf_file and not player_data.empty:
     df_perf = pd.read_csv(perf_file)
     perf_map = {}
     display_rank_map = {}
-    
     for _, row in df_perf.iterrows():
         p_name = clean_name(row.get('Unnamed: 2'))
         rank_raw = str(row.get('Unnamed: 3'))
-        
         if p_name and "/" in rank_raw:
             try:
                 rank_val = int(rank_raw.split('/')[0])
                 total_val = int(rank_raw.split('/')[1])
-                # Grade logic: 100 is elite. (e.g. 8/40 = 20th percentile = 80 Grade)
+                # Grade logic: 100 is elite. (e.g. 8/40 = 80% percentile score)
                 score = max(0, 100 - (rank_val / total_val * 100))
                 perf_map[p_name] = score
                 display_rank_map[p_name] = rank_raw
             except: continue
-    
     player_data['Grade'] = player_data['Player'].map(perf_map).fillna(50)
     player_data['Actual Rank'] = player_data['Player'].map(display_rank_map).fillna("N/A")
 else:
@@ -96,6 +96,7 @@ else:
 # 3. Final Calculations
 if not player_data.empty:
     player_data['Weight'] = player_data['Position'].apply(lambda x: POS_DATA.get(x, {'weight': 0.5})['weight'])
+    # ROI = (Performance Grade * Position Weight) / (Cap % Utilization)
     player_data['ROI'] = (player_data['Grade'] * player_data['Weight']) / (player_data['Cap %'] + 0.1)
 
 # --- Dashboard ---
@@ -108,8 +109,38 @@ if not player_data.empty:
     m2.metric("Cap Space", f"${(SALARY_CAP_2026 - total_spent)/1e6:.1f}M")
     m3.metric("Roster ROI Avg", round(player_data['ROI'].mean(), 2))
 
+    # --- Historical Benchmark & Strategic Twin ---
     st.divider()
+    st.subheader("🏛️ Historical Benchmark & Strategic Twin")
+    
+    qb_data = player_data[player_data['Position'] == 'QB']
+    avg_qb_grade = qb_data['Grade'].mean() if not qb_data.empty else 0
+    total_qb_cap = qb_data['Cap %'].sum()
+    team_roi_avg = player_data['ROI'].mean()
+    
+    twin_name = "Modern Balanced Roster"
+    twin_desc = "Standard capital allocation across all units."
+    
+    # Ravens/Chiefs Logic (High Spend, High Performance QB)
+    if total_qb_cap > 15 and avg_qb_grade >= 75:
+        twin_name = "2024 Kansas City Chiefs"
+        twin_desc = "The 'Elite Ceiling' Strategy. Heavily invested in a top-tier QB (20%+ cap). Success relies on stars playing at an MVP level to offset lower spending on role players."
+    # Vikings Logic (Poor QB Performance, but high ROI elsewhere)
+    elif avg_qb_grade < 30 and team_roi_avg > 5:
+        twin_name = "2019 San Francisco 49ers / 2015 Broncos"
+        twin_desc = "The 'System & Defense' Strategy. QB room is a weak link, but high efficiency in trenches/skill groups mirrors teams that made Super Bowls with elite systems rather than superstar QB play."
+    # Rookie Window Logic
+    elif total_qb_cap < 5 and avg_qb_grade > 70:
+        twin_name = "2022 Philadelphia Eagles (Rookie Window)"
+        twin_desc = "The 'Rookie Contract' Window. Massive savings at QB allow for an 'Avengers' roster elsewhere."
 
+    tc1, tc2 = st.columns([1, 2])
+    tc1.info(f"**Strategic Twin:** {twin_name}")
+    tc2.write(f"**Executive Insight:** {twin_desc}")
+
+    st.divider()
+    
+    # Visualizations
     col_l, col_r = st.columns([2, 1])
     with col_l:
         st.subheader("Player Value Matrix")
@@ -124,29 +155,34 @@ if not player_data.empty:
 
     with col_r:
         st.subheader("Top ROI 'Steals'")
-        top_steals = player_data.sort_values('ROI', ascending=False).head(10)
-        st.dataframe(top_steals[['Player', 'Position', 'Actual Rank', 'ROI']], hide_index=True)
+        st.dataframe(player_data.sort_values('ROI', ascending=False).head(10)[['Player', 'Position', 'Actual Rank', 'ROI']], hide_index=True)
 
-    # Positional Summary
+    # Positional Efficiency Summary (Aggregated Table)
     st.divider()
     st.subheader("Positional Efficiency Summary")
-    pos_summary = player_data.groupby('Position').agg({'Cap Hit': 'sum', 'Grade': 'mean', 'ROI': 'mean'}).reset_index().sort_values('ROI', ascending=False)
-    st.dataframe(pos_summary.style.format({'Cap Hit': '${:,.0f}', 'Grade': '{:.1f}', 'ROI': '{:.2f}'}), hide_index=True, use_container_width=True)
+    pos_summary = player_data.groupby('Position').agg({
+        'Cap Hit': 'sum',
+        'Grade': 'mean',
+        'ROI': 'mean'
+    }).reset_index().sort_values('ROI', ascending=False)
+    
+    st.dataframe(pos_summary.style.format({
+        'Cap Hit': '${:,.0f}',
+        'Grade': '{:.1f}',
+        'ROI': '{:.2f}'
+    }), hide_index=True, use_container_width=True)
 
     # High Leverage Audit
     st.divider()
     st.subheader("🕵️ Executive Audit")
-    # Audit for players making more than $15M
     big_contracts = player_data[player_data['Cap Hit'] > 15_000_000].sort_values('ROI', ascending=True)
     
     for _, p in big_contracts.iterrows():
-        # High Cap ROI Thresholds: QB ROI is naturally lower due to high cap.
-        # We check if the grade is high enough regardless of raw ROI.
         if p['Grade'] >= 80:
-            st.success(f"**{p['Player']}** ({p['Position']}): Rank **{p['Actual Rank']}** | Grade **{p['Grade']:.1f}** — **JUSTIFIED**. High production offsets the \$ {p['Cap Hit']/1e6:.1f}M cap hit.")
+            st.success(f"**{p['Player']}** ({p['Position']}): Rank **{p['Actual Rank']}** (Grade {p['Grade']:.1f}) — **JUSTIFIED**. Elite production offsets the high cap hit.")
         elif p['ROI'] < 3.5:
-            st.error(f"**{p['Player']}** ({p['Position']}): Rank **{p['Actual Rank']}** | Grade **{p['Grade']:.1f}** — **INEFFICIENT**. Performance is not commensurate with high salary.")
+            st.error(f"**{p['Player']}** ({p['Position']}): Rank **{p['Actual Rank']}** (Grade {p['Grade']:.1f}) — **INEFFICIENT**. Performance is not commensurate with high salary.")
         else:
-            st.warning(f"**{p['Player']}** ({p['Position']}): Rank **{p['Actual Rank']}** | Grade **{p['Grade']:.1f}** — **STABLE**. Acceptable but high-risk efficiency.")
+            st.warning(f"**{p['Player']}** ({p['Position']}): Rank **{p['Actual Rank']}** (Grade {p['Grade']:.1f}) — **STABLE**. Acceptable but high-risk efficiency.")
 else:
-    st.info("Upload your CSV files to see the analysis.")
+    st.info("Upload CSV files to populate the dashboard and identify your Strategic Twin.")
