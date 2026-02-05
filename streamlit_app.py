@@ -7,15 +7,29 @@ import re
 st.set_page_config(page_title="NFL GM Roster ROI", layout="wide")
 SALARY_CAP_2026 = 303_500_000
 
-# Grouping logic for calculations
-ROI_GROUPS = {
-    "QB": ["QB"], "RB": ["RB", "FB"], "WR": ["WR"], "TE": ["TE"],
-    "OL": ["LT", "LG", "C", "RG", "RT", "OL", "G", "T"],
-    "DL": ["ED", "IDL", "DT", "DE", "DL"], "LB": ["LB", "ILB", "OLB"],
-    "DB": ["CB", "S", "FS", "SS", "DB"], "ST": ["K", "P", "LS"]
+# Positional Groups & Premium Weights
+# 1.0 = Max Premium, lower values = Non-Premium (higher ROI hurdle)
+POS_DATA = {
+    "QB": {"groups": ["QB"], "weight": 1.0},
+    "WR": {"groups": ["WR"], "weight": 0.95},
+    "OL": {"groups": ["LT", "LG", "C", "RG", "RT", "OL", "G", "T"], "weight": 0.9},
+    "DL": {"groups": ["ED", "IDL", "DT", "DE", "DL", "LDE", "RDE", "NT"], "weight": 0.9},
+    "DB": {"groups": ["CB", "S", "FS", "SS", "DB", "LCB", "RCB"], "weight": 0.85},
+    "TE": {"groups": ["TE"], "weight": 0.75},
+    "LB": {"groups": ["LB", "ILB", "OLB", "WLB", "LILB", "RILB", "SLB"], "weight": 0.7},
+    "RB": {"groups": ["RB", "FB", "HB"], "weight": 0.65},
+    "ST": {"groups": ["K", "P", "LS"], "weight": 0.5}
 }
 
 # --- Helper Functions ---
+def get_roi_category(pos_label):
+    if pd.isna(pos_label): return "ST"
+    pos_label = str(pos_label).upper()
+    for cat, data in POS_DATA.items():
+        if pos_label in data['groups']:
+            return cat
+    return "ST"
+
 def clean_name(name):
     if pd.isna(name) or name == "-" or "Rank" in str(name) or "Pos" in str(name): return None
     return re.sub(r'\s(Q|IR|PUP|SUSP|NFI)$', '', str(name)).strip()
@@ -53,12 +67,12 @@ if roster_file:
         if pd.isna(label): continue
         for p_name in depth_players.iloc[idx].dropna():
             p_clean = clean_name(p_name)
-            if p_clean: pos_map[p_clean] = str(label).upper()
+            if p_clean: pos_map[p_clean] = get_roi_category(label)
     
     player_data['Position'] = player_data['Player'].map(pos_map)
     player_data['Cap %'] = (player_data['Cap Hit'] / SALARY_CAP_2026) * 100
 
-# 2. Process Performance File (Handling the new 20/40 format)
+# 2. Process Performance File (Revised Logic for Premium Criticality)
 if perf_file and not player_data.empty:
     df_perf = pd.read_csv(perf_file)
     perf_map = {}
@@ -70,44 +84,45 @@ if perf_file and not player_data.empty:
             try:
                 rank = int(rank_raw.split('/')[0])
                 total_in_pos = int(rank_raw.split('/')[1])
-                # ROI Performance Score: 100 is elite, 0 is poor
-                score = max(0, 100 - (rank / total_in_pos * 100))
+                
+                # Performance base (100 is best)
+                percentile = rank / total_in_pos
+                score = max(0, 100 - (percentile * 100))
                 perf_map[p_name] = score
             except: continue
     
     player_data['Performance'] = player_data['Player'].map(perf_map).fillna(50)
 else:
-    if not player_data.empty:
-        player_data['Performance'] = 70.0
+    if not player_data.empty: player_data['Performance'] = 70.0
 
-# 3. Final Calculations
+# 3. Final ROI Calculation (Positional Hurdle Applied)
 if not player_data.empty:
-    player_data['ROI'] = player_data['Performance'] / (player_data['Cap %'] + 0.1)
+    # ROI = (Performance * Weight) / Cap% 
+    # This penalizes high spend on non-premium positions (TE/LB/RB)
+    player_data['Weight'] = player_data['Position'].apply(lambda x: POS_DATA.get(x, {'weight': 0.5})['weight'])
+    player_data['ROI'] = (player_data['Performance'] * player_data['Weight']) / (player_data['Cap %'] + 0.1)
 
-# --- Dashboard Layout ---
+# --- Dashboard ---
 st.title("🏈 2026 NFL GM ROI Dashboard")
 st.markdown(f"**Target Salary Cap:** ${SALARY_CAP_2026:,}")
 
 if not player_data.empty:
     total_spent = player_data['Cap Hit'].sum()
-    
-    # Top Level Metrics
     m1, m2, m3 = st.columns(3)
     m1.metric("Total Committed", f"${total_spent/1e6:.1f}M", f"{total_spent/SALARY_CAP_2026*100:.1f}% Use")
     m2.metric("Cap Space", f"${(SALARY_CAP_2026 - total_spent)/1e6:.1f}M")
-    m3.metric("Roster ROI Avg", round(player_data['ROI'].mean(), 2))
+    m3.metric("Team ROI Avg", round(player_data['ROI'].mean(), 2))
 
     st.divider()
 
-    # Matrix Visualization
     col_l, col_r = st.columns([2, 1])
     with col_l:
-        st.subheader("Player Value Matrix")
+        st.subheader("Player Value Matrix (Position Weighted)")
         fig = px.scatter(
             player_data[player_data['Cap Hit'] > 0], 
             x="Cap Hit", y="Performance", size="ROI", color="Position",
             hover_name="Player",
-            title="The 'Bargain' Zone (Top Left) vs. 'Overpaid' Zone (Bottom Right)",
+            title="Note: Bubble size accounts for Positional Value (LB/TE are smaller at same rank/cost)",
             color_discrete_sequence=px.colors.qualitative.Prism
         )
         st.plotly_chart(fig, use_container_width=True)
@@ -134,17 +149,16 @@ if not player_data.empty:
 
     # High Leverage Audit
     st.divider()
-    st.subheader("🕵️ High-Leverage Asset Audit")
-    # Filters for players taking up more than 5% of the cap
-    big_contracts = player_data[player_data['Cap %'] > 5].sort_values('Cap %', ascending=False)
+    st.subheader("🕵️ Executive Audit: The 'Premium' Filter")
+    big_contracts = player_data[player_data['Cap %'] > 5].sort_values('ROI', ascending=True)
     
     for _, p in big_contracts.iterrows():
-        if p['ROI'] > 5:
-            st.success(f"**{p['Player']}** ({p['Position']}): Cap Hit ${p['Cap Hit']/1e6:.1f}M | ROI: {p['ROI']:.2f} — **JUSTIFIED**. Elite production offsets high cost.")
-        elif p['ROI'] > 2:
-            st.info(f"**{p['Player']}** ({p['Position']}): Cap Hit ${p['Cap Hit']/1e6:.1f}M | ROI: {p['ROI']:.2f} — **STABLE**. Performance is commensurate with salary.")
+        if p['ROI'] < 4.0:
+            st.error(f"**{p['Player']}** ({p['Position']}): ROI is **Low ({p['ROI']:.2f})**. Ranked {p['Performance']:.0f}/100. At this price point for a non-premium position, elite (Top 5) play is required to justify the cap hit.")
+        elif p['ROI'] < 6.0:
+            st.warning(f"**{p['Player']}** ({p['Position']}): ROI is **Moderate ({p['ROI']:.2f})**. Efficiency is being tested by high cap utilization.")
         else:
-            st.warning(f"**{p['Player']}** ({p['Position']}): Cap Hit ${p['Cap Hit']/1e6:.1f}M | ROI: {p['ROI']:.2f} — **INEFFICIENT**. This contract is a significant drain on roster value.")
+            st.success(f"**{p['Player']}** ({p['Position']}): ROI is **High ({p['ROI']:.2f})**. High cost is currently offset by premium positional value or elite performance.")
 
 else:
     st.info("Upload your Roster and the new 'X/Y' Ranking CSVs to see your team breakdown.")
